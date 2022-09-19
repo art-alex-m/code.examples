@@ -1,0 +1,145 @@
+version: '3.9'
+
+x-templates:
+  micro: &micro
+    image: 'kafkaed:php8.1-focal-dev'
+    build:
+      context: ./docker/micro
+      dockerfile: Dockerfile
+      args:
+        WWWGROUP: ${WWWGROUP}
+        WWWUSER: ${WWWUSER}
+    env_file:
+      - .env
+    networks:
+      - kafka
+    depends_on:
+      - redis
+    links:
+      - redis
+
+services:
+  consumer:
+    <<: *micro
+    volumes:
+      - './packages:/var/www/packages'
+      - './consumer:/var/www/html'
+      - './docker/consumer/supervisord.conf:/etc/supervisor/conf.d/supervisord.conf'
+    links:
+      - wsserver
+      - redis
+      - kafka
+    depends_on:
+      - wsserver
+      - redis
+      - kafka
+
+  producer:
+    <<: *micro
+    volumes:
+      - './packages:/var/www/packages'
+      - './producer:/var/www/html'
+      - './docker/producer/supervisord.conf:/etc/supervisor/conf.d/supervisord.conf'
+    links:
+      - redis
+      - kafka
+    depends_on:
+      - redis
+      - kafka
+
+  wsserver:
+    <<: *micro
+    expose:
+      - 2222
+    volumes:
+      - './packages:/var/www/packages'
+      - './wsserver:/var/www/html'
+      - './docker/wsserver/supervisord.conf:/etc/supervisor/conf.d/supervisord.conf'
+    networks:
+      kafka:
+        ipv4_address: 10.100.115.25
+        aliases:
+          - kafka-ws.loc
+    depends_on:
+      - redis
+      - db
+    links:
+      - redis
+      - db
+
+  web:
+    <<: *micro
+    expose:
+      - 80
+    volumes:
+      - './packages:/var/www/packages'
+      - './web:/var/www/html'
+      - './docker/web/supervisord.conf:/etc/supervisor/conf.d/supervisord.conf'
+    networks:
+      kafka:
+        ipv4_address: 10.100.115.15
+        aliases:
+          - kafka-web.loc
+
+  redis:
+    image: 'redis:6.2-alpine'
+    networks:
+      - kafka
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:latest
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - 22181:2181
+    networks:
+      - kafka
+
+  kafka:
+    image: confluentinc/cp-kafka:latest
+    cpu_count: 2
+    depends_on:
+      - zookeeper
+    ports:
+      - 29092:29092
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:19092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    networks:
+      - kafka
+
+  db:
+    image: 'postgres:14.2-alpine'
+    environment:
+      POSTGRES_MULTIPLE_DATABASES: ${DB_WEB}, ${DB_WEBSOCKET}
+      PGPASSWORD: ${DB_PASSWORD:-secret}
+      POSTGRES_USER: ${DB_USERNAME}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-secret}
+    volumes:
+      - 'kafkaed-db:/var/lib/postgresql/data'
+      - './docker/db:/docker-entrypoint-initdb.d'
+    networks:
+      kafka:
+        ipv4_address: 10.100.115.100
+    healthcheck:
+      test: [ "CMD", "pg_isready", "-q", "-d", "${DB_DATABASE}", "-U", "${DB_USERNAME}" ]
+      retries: 3
+      timeout: 5s
+
+networks:
+  kafka:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.100.115.0/24
+    driver_opts:
+      com.docker.network.bridge.name: kafkaed
+
+volumes:
+  kafkaed-db:
+    driver: local
